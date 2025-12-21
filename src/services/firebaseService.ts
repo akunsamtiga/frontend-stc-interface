@@ -1,7 +1,7 @@
 import { database, ref, onValue, off } from '../config/firebase';
 import { FirebasePriceData, OHLCData } from '../types';
 
-// ✅ Debounce utility untuk mencegah terlalu banyak updates
+// ✅ Utility functions
 function debounce<T extends (...args: any[]) => any>(
   func: T,
   wait: number
@@ -14,19 +14,20 @@ function debounce<T extends (...args: any[]) => any>(
   };
 }
 
-// ✅ Throttle utility untuk limit frequency
 function throttle<T extends (...args: any[]) => any>(
   func: T,
   limit: number
 ): (...args: Parameters<T>) => void {
   let inThrottle: boolean;
+  let lastResult: any;
   
   return function(this: any, ...args: Parameters<T>) {
     if (!inThrottle) {
-      func.apply(this, args);
+      lastResult = func.apply(this, args);
       inThrottle = true;
       setTimeout(() => inThrottle = false, limit);
     }
+    return lastResult;
   };
 }
 
@@ -35,15 +36,15 @@ class FirebaseService {
   private priceCache: Map<string, FirebasePriceData> = new Map();
   private ohlcCache: Map<string, OHLCData[]> = new Map();
   private lastPriceUpdate: Map<string, number> = new Map();
+  private lastOHLCUpdate: Map<string, number> = new Map();
   
-  // ✅ Cache duration (1 second)
-  private readonly CACHE_DURATION = 1000;
-  
-  // ✅ Throttle/debounce settings
-  private readonly PRICE_UPDATE_THROTTLE = 100; // Max 10 updates/second
-  private readonly OHLC_UPDATE_DEBOUNCE = 500;  // Wait 500ms before processing
+  // ✅ INCREASED intervals untuk mengurangi load
+  private readonly CACHE_DURATION = 2000; // 2 detik (naik dari 1 detik)
+  private readonly PRICE_UPDATE_THROTTLE = 500; // Max 2 updates/detik (turun dari 10/detik)
+  private readonly OHLC_UPDATE_DEBOUNCE = 1000; // 1 detik (naik dari 500ms)
+  private readonly MIN_PRICE_CHANGE = 0.001; // Minimal perubahan harga untuk update
 
-  // ✅ Subscribe to price dengan throttling
+  // ✅ Subscribe to price dengan throttling LEBIH KETAT
   subscribeToPrice(
     assetSymbol: string,
     callback: (data: FirebasePriceData) => void
@@ -51,16 +52,18 @@ class FirebaseService {
     const path = `/${assetSymbol.toLowerCase()}/current_price`;
     const priceRef = ref(database, path);
 
-    // ✅ Throttled callback untuk limit updates
+    // ✅ Throttled callback dengan minimum change detection
     const throttledCallback = throttle((data: FirebasePriceData) => {
-      // Check cache
       const cached = this.priceCache.get(assetSymbol);
       const lastUpdate = this.lastPriceUpdate.get(assetSymbol) || 0;
       const now = Date.now();
 
-      // Skip if same price and within cache duration
-      if (cached && cached.price === data.price && (now - lastUpdate) < this.CACHE_DURATION) {
-        return;
+      // Skip jika dalam cache duration DAN harga tidak berubah signifikan
+      if (cached && (now - lastUpdate) < this.CACHE_DURATION) {
+        const priceChange = Math.abs(data.price - cached.price);
+        if (priceChange < this.MIN_PRICE_CHANGE) {
+          return; // Skip update jika perubahan terlalu kecil
+        }
       }
 
       // Update cache
@@ -89,7 +92,7 @@ class FirebaseService {
     };
   }
 
-  // ✅ Subscribe to OHLC dengan debouncing dan batching
+  // ✅ Subscribe to OHLC dengan debouncing LEBIH LAMA
   subscribeToOHLC(
     assetSymbol: string,
     callback: (data: OHLCData[]) => void
@@ -97,15 +100,23 @@ class FirebaseService {
     const path = `/${assetSymbol.toLowerCase()}/ohlc`;
     const ohlcRef = ref(database, path);
 
-    // ✅ Debounced callback untuk batch updates
+    // ✅ Debounced callback dengan change detection
     const debouncedCallback = debounce((data: OHLCData[]) => {
-      // Check if data actually changed
       const cached = this.ohlcCache.get(assetSymbol);
+      const lastUpdate = this.lastOHLCUpdate.get(assetSymbol) || 0;
+      const now = Date.now();
+
+      // Skip jika baru saja update (dalam 1 detik terakhir)
+      if ((now - lastUpdate) < 1000) {
+        return;
+      }
+
+      // Check if data actually changed
       if (cached && cached.length === data.length) {
         const lastCached = cached[cached.length - 1];
         const lastNew = data[data.length - 1];
         
-        // Skip if last candle is same
+        // Skip jika candle terakhir sama
         if (lastCached?.timestamp === lastNew?.timestamp && 
             lastCached?.close === lastNew?.close) {
           return;
@@ -114,17 +125,18 @@ class FirebaseService {
 
       // Update cache
       this.ohlcCache.set(assetSymbol, data);
+      this.lastOHLCUpdate.set(assetSymbol, now);
       callback(data);
     }, this.OHLC_UPDATE_DEBOUNCE);
 
     const unsubscribe = onValue(ohlcRef, (snapshot) => {
       const data = snapshot.val();
       if (data) {
-        // ✅ Process data efficiently
+        // ✅ Process efficiently - LIMIT to 500 (turun dari 1000)
         const ohlcArray = Object.keys(data)
           .map(key => data[key])
           .sort((a, b) => a.timestamp - b.timestamp)
-          .slice(-1000); // Keep last 1000 only
+          .slice(-500); // Keep last 500 only
         
         debouncedCallback(ohlcArray);
       }
@@ -138,10 +150,11 @@ class FirebaseService {
       off(ohlcRef);
       this.listeners.delete(path);
       this.ohlcCache.delete(assetSymbol);
+      this.lastOHLCUpdate.delete(assetSymbol);
     };
   }
 
-  // ✅ Get historical OHLC with caching
+  // ✅ Get historical OHLC dengan caching
   async getHistoricalOHLC(
     assetSymbol: string,
     limit: number = 100
@@ -156,8 +169,13 @@ class FirebaseService {
       const path = `/${assetSymbol.toLowerCase()}/ohlc`;
       const ohlcRef = ref(database, path);
 
-      // ✅ Use once() for one-time read
+      // ✅ One-time read with timeout
+      const timeoutId = setTimeout(() => {
+        reject(new Error('Historical OHLC fetch timeout'));
+      }, 5000);
+
       onValue(ohlcRef, (snapshot) => {
+        clearTimeout(timeoutId);
         const data = snapshot.val();
         if (data) {
           const ohlcArray = Object.keys(data)
@@ -172,11 +190,6 @@ class FirebaseService {
           resolve([]);
         }
       }, { onlyOnce: true });
-
-      // Timeout after 5 seconds
-      setTimeout(() => {
-        reject(new Error('Historical OHLC fetch timeout'));
-      }, 5000);
     });
   }
 
@@ -186,10 +199,12 @@ class FirebaseService {
       this.priceCache.delete(assetSymbol);
       this.ohlcCache.delete(assetSymbol);
       this.lastPriceUpdate.delete(assetSymbol);
+      this.lastOHLCUpdate.delete(assetSymbol);
     } else {
       this.priceCache.clear();
       this.ohlcCache.clear();
       this.lastPriceUpdate.clear();
+      this.lastOHLCUpdate.clear();
     }
   }
 

@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useTradingStore } from '../stores/tradingStore';
 import { tradingService } from '../services/tradingService';
 import { firebaseService } from '../services/firebaseService';
@@ -41,7 +41,12 @@ export const TradingPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [showOrderBook, setShowOrderBook] = useState(false);
 
-  // ✅ Memoized expensive calculations
+  // ✅ useRef untuk prevent multiple calls
+  const initRef = useRef(false);
+  const ordersIntervalRef = useRef<NodeJS.Timeout>();
+  const balanceIntervalRef = useRef<NodeJS.Timeout>();
+
+  // ✅ useMemo untuk expensive calculations
   const totalProfit = useMemo(() => {
     return orders
       .filter(o => o.profit !== null)
@@ -50,6 +55,10 @@ export const TradingPage: React.FC = () => {
 
   // ✅ useCallback untuk prevent re-creation
   const initializeTrading = useCallback(async () => {
+    // Prevent double initialization
+    if (initRef.current) return;
+    initRef.current = true;
+
     try {
       setError(null);
       
@@ -82,7 +91,7 @@ export const TradingPage: React.FC = () => {
     try {
       const symbol = selectedAsset.symbol.replace('/', '_');
 
-      // ✅ Price subscription dengan throttling
+      // ✅ Price subscription (sudah di-throttle di firebaseService)
       const unsubscribePrice = firebaseService.subscribeToPrice(
         symbol,
         (priceData) => {
@@ -92,7 +101,7 @@ export const TradingPage: React.FC = () => {
         }
       );
 
-      // ✅ OHLC subscription dengan debouncing
+      // ✅ OHLC subscription (sudah di-debounce di firebaseService)
       const unsubscribeOHLC = firebaseService.subscribeToOHLC(
         symbol,
         (ohlcArray) => {
@@ -100,7 +109,7 @@ export const TradingPage: React.FC = () => {
         }
       );
 
-      // Load historical data
+      // Load historical data (one-time)
       loadHistoricalData(symbol);
 
       return () => {
@@ -115,7 +124,7 @@ export const TradingPage: React.FC = () => {
 
   const loadHistoricalData = useCallback(async (symbol: string) => {
     try {
-      const historical = await firebaseService.getHistoricalOHLC(symbol, 500);
+      const historical = await firebaseService.getHistoricalOHLC(symbol, 300);
       if (historical.length > 0) {
         setOHLCData(historical);
       }
@@ -124,7 +133,7 @@ export const TradingPage: React.FC = () => {
     }
   }, [setOHLCData]);
 
-  // ✅ Debounced fetch orders
+  // ✅ Fetch orders with longer interval
   const fetchOrders = useCallback(async () => {
     try {
       const data = await tradingService.getOrders();
@@ -139,7 +148,7 @@ export const TradingPage: React.FC = () => {
       const data = await tradingService.getBalance();
       setBalance(data.balance);
     } catch (error: any) {
-      toast.error('Failed to update balance');
+      console.error('Failed to load balance:', error);
     }
   }, [setBalance]);
 
@@ -205,6 +214,8 @@ export const TradingPage: React.FC = () => {
     
     return () => {
       firebaseService.unsubscribeAll();
+      if (ordersIntervalRef.current) clearInterval(ordersIntervalRef.current);
+      if (balanceIntervalRef.current) clearInterval(balanceIntervalRef.current);
     };
   }, [initializeTrading]);
 
@@ -215,16 +226,27 @@ export const TradingPage: React.FC = () => {
     return cleanup;
   }, [setupFirebaseListeners]);
 
-  // ✅ Fetch orders on mount and interval
+  // ✅ Fetch orders with LONGER interval - 30 seconds (naik dari 15)
   useEffect(() => {
     if (selectedAsset) {
       fetchOrders();
       
-      // ✅ Longer interval - 15 seconds instead of 10
-      const ordersInterval = setInterval(fetchOrders, 15000);
-      return () => clearInterval(ordersInterval);
+      ordersIntervalRef.current = setInterval(fetchOrders, 30000); // 30 detik
+      return () => {
+        if (ordersIntervalRef.current) clearInterval(ordersIntervalRef.current);
+      };
     }
   }, [selectedAsset, fetchOrders]);
+
+  // ✅ Balance refresh dengan interval LEBIH LAMA - 60 seconds
+  useEffect(() => {
+    if (selectedAsset) {
+      balanceIntervalRef.current = setInterval(loadBalance, 60000); // 60 detik
+      return () => {
+        if (balanceIntervalRef.current) clearInterval(balanceIntervalRef.current);
+      };
+    }
+  }, [selectedAsset, loadBalance]);
 
   if (loading) {
     return (
@@ -245,7 +267,10 @@ export const TradingPage: React.FC = () => {
           <h2 className="text-xl font-bold mb-2 text-white">Initialization Failed</h2>
           <p className="text-sm text-primary-400 mb-6">{error}</p>
           <button
-            onClick={initializeTrading}
+            onClick={() => {
+              initRef.current = false;
+              initializeTrading();
+            }}
             className="px-6 py-2.5 bg-accent text-primary-950 rounded-lg hover:bg-accent/90 transition-colors font-medium"
           >
             Retry Connection
@@ -317,7 +342,10 @@ export const TradingPage: React.FC = () => {
               <p className="text-lg text-white mb-2">No Assets Available</p>
               <p className="text-sm text-primary-500 mb-6">Contact administrator to configure trading assets</p>
               <button
-                onClick={initializeTrading}
+                onClick={() => {
+                  initRef.current = false;
+                  initializeTrading();
+                }}
                 className="px-6 py-2.5 bg-accent text-primary-950 rounded-lg hover:bg-accent/90 transition-colors font-medium"
               >
                 Retry
@@ -465,7 +493,10 @@ export const TradingPage: React.FC = () => {
               <p className="text-lg text-white mb-2">No Assets Available</p>
               <p className="text-sm text-primary-500 mb-6">Contact administrator to configure trading assets</p>
               <button
-                onClick={initializeTrading}
+                onClick={() => {
+                  initRef.current = false;
+                  initializeTrading();
+                }}
                 className="px-6 py-2.5 bg-accent text-primary-950 rounded-lg hover:bg-accent/90 transition-colors font-medium"
               >
                 Retry

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useMemo, memo } from 'react';
 import { createChart, IChartApi, ISeriesApi, UTCTimestamp, IPriceLine } from 'lightweight-charts';
 import { OHLCData, Order } from '../../types';
 import { Activity, TrendingUp, TrendingDown, ArrowUp, ArrowDown } from 'lucide-react';
@@ -10,7 +10,8 @@ interface TradingChartProps {
   height?: number;
 }
 
-export const TradingChart: React.FC<TradingChartProps> = ({ 
+// ✅ Memoized untuk prevent re-render
+export const TradingChart: React.FC<TradingChartProps> = memo(({ 
   data, 
   currentPrice,
   activeOrders = [],
@@ -25,6 +26,10 @@ export const TradingChart: React.FC<TradingChartProps> = ({
   const [priceChange, setPriceChange] = useState(0);
   const [priceChangePercent, setPriceChangePercent] = useState(0);
   const [isMobile, setIsMobile] = useState(false);
+  
+  // ✅ Track last update to prevent unnecessary re-renders
+  const lastDataLengthRef = useRef(0);
+  const lastPriceRef = useRef<number | null>(null);
 
   // Detect mobile
   useEffect(() => {
@@ -33,13 +38,15 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     };
     
     checkMobile();
-    window.addEventListener('resize', checkMobile);
+    const debouncedResize = debounce(checkMobile, 200);
+    window.addEventListener('resize', debouncedResize);
     
-    return () => window.removeEventListener('resize', checkMobile);
+    return () => window.removeEventListener('resize', debouncedResize);
   }, []);
 
+  // ✅ Initialize chart only once
   useEffect(() => {
-    if (!chartContainerRef.current) return;
+    if (!chartContainerRef.current || chartRef.current) return;
 
     const chart = createChart(chartContainerRef.current, {
       layout: {
@@ -102,7 +109,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     chartRef.current = chart;
     candleSeriesRef.current = candleSeries;
 
-    const handleResize = () => {
+    const handleResize = debounce(() => {
       if (chartContainerRef.current && chartRef.current) {
         const newWidth = chartContainerRef.current.clientWidth;
         const newHeight = window.innerWidth < 768 ? Math.min(height, 400) : height;
@@ -112,50 +119,61 @@ export const TradingChart: React.FC<TradingChartProps> = ({
           height: newHeight,
         });
       }
-    };
+    }, 200);
 
     window.addEventListener('resize', handleResize);
 
     return () => {
       window.removeEventListener('resize', handleResize);
       chart.remove();
+      chartRef.current = null;
+      candleSeriesRef.current = null;
     };
   }, [height, isMobile]);
 
+  // ✅ Update chart data only when actually changed
   useEffect(() => {
-    if (candleSeriesRef.current && data.length > 0) {
-      try {
-        const sortedData = [...data].sort((a, b) => a.timestamp - b.timestamp);
-        
-        const chartData = sortedData.map(d => ({
-          time: d.timestamp as UTCTimestamp,
-          open: d.open,
-          high: d.high,
-          low: d.low,
-          close: d.close,
-        }));
+    if (!candleSeriesRef.current || data.length === 0) return;
 
-        candleSeriesRef.current.setData(chartData);
-        
-        if (chartRef.current) {
-          chartRef.current.timeScale().fitContent();
-        }
+    // Skip if data hasn't changed
+    if (data.length === lastDataLengthRef.current) {
+      return;
+    }
 
-        if (sortedData.length >= 2) {
-          const firstPrice = sortedData[0].close;
-          const lastPrice = sortedData[sortedData.length - 1].close;
-          const change = lastPrice - firstPrice;
-          const changePercent = (change / firstPrice) * 100;
-          setPriceChange(change);
-          setPriceChangePercent(changePercent);
-        }
-      } catch (error) {
-        console.error('Error setting chart data:', error);
+    try {
+      const sortedData = [...data].sort((a, b) => a.timestamp - b.timestamp);
+      
+      const chartData = sortedData.map(d => ({
+        time: d.timestamp as UTCTimestamp,
+        open: d.open,
+        high: d.high,
+        low: d.low,
+        close: d.close,
+      }));
+
+      candleSeriesRef.current.setData(chartData);
+      
+      if (chartRef.current) {
+        chartRef.current.timeScale().fitContent();
       }
+
+      // Calculate price change only when data changes
+      if (sortedData.length >= 2) {
+        const firstPrice = sortedData[0].close;
+        const lastPrice = sortedData[sortedData.length - 1].close;
+        const change = lastPrice - firstPrice;
+        const changePercent = (change / firstPrice) * 100;
+        setPriceChange(change);
+        setPriceChangePercent(changePercent);
+      }
+
+      lastDataLengthRef.current = data.length;
+    } catch (error) {
+      console.error('Error setting chart data:', error);
     }
   }, [data]);
 
-  // Order Markers
+  // ✅ Update price lines only when activeOrders actually change
   useEffect(() => {
     if (!candleSeriesRef.current || !chartRef.current) return;
 
@@ -374,4 +392,27 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       </div>
     </div>
   );
-};
+}, (prevProps, nextProps) => {
+  // ✅ Custom comparison untuk prevent unnecessary re-renders
+  return (
+    prevProps.data.length === nextProps.data.length &&
+    prevProps.currentPrice === nextProps.currentPrice &&
+    (prevProps.activeOrders?.length || 0) === (nextProps.activeOrders?.length || 0) &&
+    prevProps.height === nextProps.height
+  );
+});
+
+TradingChart.displayName = 'TradingChart';
+
+// ✅ Debounce helper
+function debounce<T extends (...args: any[]) => any>(
+  func: T,
+  wait: number
+): (...args: Parameters<T>) => void {
+  let timeout: NodeJS.Timeout | null = null;
+  
+  return function(this: any, ...args: Parameters<T>) {
+    if (timeout) clearTimeout(timeout);
+    timeout = setTimeout(() => func.apply(this, args), wait);
+  };
+}
