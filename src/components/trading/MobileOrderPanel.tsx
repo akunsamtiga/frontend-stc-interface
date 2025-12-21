@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useCallback, useMemo, memo } from 'react';
 import { ArrowUp, ArrowDown, Loader2 } from 'lucide-react';
 import { formatCurrency } from '../../utils/format';
 import toast from 'react-hot-toast';
@@ -14,7 +14,8 @@ interface MobileOrderPanelProps {
 const DURATIONS = [1, 2, 3, 5, 15, 30];
 const QUICK_AMOUNTS = [10000, 50000, 100000, 500000, 1000000];
 
-export const MobileOrderPanel: React.FC<MobileOrderPanelProps> = ({
+// ✅ Memoized untuk mencegah re-render
+const MobileOrderPanel: React.FC<MobileOrderPanelProps> = memo(({
   currentPrice,
   profitRate,
   balance,
@@ -27,10 +28,18 @@ export const MobileOrderPanel: React.FC<MobileOrderPanelProps> = ({
   const [showAmountPicker, setShowAmountPicker] = useState(false);
   const [showDurationPicker, setShowDurationPicker] = useState(false);
 
-  const potentialProfit = amount ? (Number(amount) * profitRate) / 100 : 0;
-  const potentialReturn = amount ? Number(amount) + potentialProfit : 0;
+  // ✅ useMemo untuk kalkulasi berat
+  const { potentialProfit, potentialReturn } = useMemo(() => {
+    const numAmount = Number(amount) || 0;
+    const profit = (numAmount * profitRate) / 100;
+    return {
+      potentialProfit: profit,
+      potentialReturn: numAmount + profit
+    };
+  }, [amount, profitRate]);
 
-  const handlePlaceOrder = async (direction: 'CALL' | 'PUT') => {
+  // ✅ useCallback untuk prevent re-creation
+  const handlePlaceOrder = useCallback(async (direction: 'CALL' | 'PUT') => {
     if (!amount || Number(amount) <= 0) {
       toast.error('Masukkan jumlah taruhan');
       return;
@@ -58,16 +67,36 @@ export const MobileOrderPanel: React.FC<MobileOrderPanelProps> = ({
     } finally {
       setIsSubmitting(false);
     }
-  };
+  }, [amount, balance, duration, onPlaceOrder]);
+
+  // ✅ useCallback untuk event handlers
+  const handleDurationSelect = useCallback((d: number) => {
+    setDuration(d);
+    setShowDurationPicker(false);
+  }, []);
+
+  const handleAmountSelect = useCallback((preset: number) => {
+    setAmount(preset.toString());
+    setShowAmountPicker(false);
+  }, []);
+
+  const toggleDurationPicker = useCallback(() => {
+    setShowDurationPicker(prev => !prev);
+    setShowAmountPicker(false);
+  }, []);
+
+  const toggleAmountPicker = useCallback(() => {
+    setShowAmountPicker(prev => !prev);
+    setShowDurationPicker(false);
+  }, []);
 
   return (
     <div className="lg:hidden w-full">
-      {/* Grid 2 Kolom x 3 Baris */}
       <div className="grid grid-cols-2 gap-2 p-3">
-        {/* Baris 1 Kolom 1: Duration Picker */}
+        {/* Duration Picker */}
         <div className="relative">
           <button
-            onClick={() => setShowDurationPicker(!showDurationPicker)}
+            onClick={toggleDurationPicker}
             disabled={disabled}
             className="w-full bg-primary-900/50 border border-primary-800 rounded-lg px-3 py-3 text-left flex items-center justify-between hover:border-accent transition-colors disabled:opacity-50"
           >
@@ -80,16 +109,12 @@ export const MobileOrderPanel: React.FC<MobileOrderPanelProps> = ({
             </svg>
           </button>
 
-          {/* Duration Dropdown */}
           {showDurationPicker && (
             <div className="absolute top-full left-0 right-0 mt-1 bg-primary-900 border border-primary-800 rounded-lg shadow-xl z-50 max-h-48 overflow-y-auto">
               {DURATIONS.map((d) => (
                 <button
                   key={d}
-                  onClick={() => {
-                    setDuration(d);
-                    setShowDurationPicker(false);
-                  }}
+                  onClick={() => handleDurationSelect(d)}
                   className={`w-full px-3 py-2.5 text-left text-sm transition-colors ${
                     duration === d
                       ? 'bg-accent text-primary-950 font-bold'
@@ -103,10 +128,10 @@ export const MobileOrderPanel: React.FC<MobileOrderPanelProps> = ({
           )}
         </div>
 
-        {/* Baris 1 Kolom 2: Amount Picker */}
+        {/* Amount Picker */}
         <div className="relative">
           <button
-            onClick={() => setShowAmountPicker(!showAmountPicker)}
+            onClick={toggleAmountPicker}
             disabled={disabled}
             className="w-full bg-primary-900/50 border border-primary-800 rounded-lg px-3 py-3 text-left flex items-center justify-between hover:border-accent transition-colors disabled:opacity-50"
           >
@@ -121,10 +146,8 @@ export const MobileOrderPanel: React.FC<MobileOrderPanelProps> = ({
             </svg>
           </button>
 
-          {/* Amount Dropdown */}
           {showAmountPicker && (
             <div className="absolute top-full right-0 left-0 mt-1 bg-primary-900 border border-primary-800 rounded-lg shadow-xl z-50 max-h-48 overflow-y-auto">
-              {/* Custom Input */}
               <div className="p-2 border-b border-primary-800">
                 <input
                   type="number"
@@ -134,14 +157,10 @@ export const MobileOrderPanel: React.FC<MobileOrderPanelProps> = ({
                   className="w-full bg-primary-950 border border-primary-800 rounded px-2 py-1.5 text-sm text-white placeholder-primary-600 focus:outline-none focus:border-accent"
                 />
               </div>
-              {/* Quick Amounts */}
               {QUICK_AMOUNTS.map((preset) => (
                 <button
                   key={preset}
-                  onClick={() => {
-                    setAmount(preset.toString());
-                    setShowAmountPicker(false);
-                  }}
+                  onClick={() => handleAmountSelect(preset)}
                   className={`w-full px-3 py-2.5 text-left text-sm transition-colors ${
                     Number(amount) === preset
                       ? 'bg-accent text-primary-950 font-bold'
@@ -155,7 +174,7 @@ export const MobileOrderPanel: React.FC<MobileOrderPanelProps> = ({
           )}
         </div>
 
-        {/* Baris 2: Info Rate & Profit (Span 2 Kolom) */}
+        {/* Info Rate & Profit */}
         <div className="col-span-2 bg-primary-900/30 border border-primary-800 rounded-lg px-3 py-2.5">
           <div className="flex items-center justify-between mb-1">
             <span className="text-2xs text-primary-500">Rate Profit</span>
@@ -169,7 +188,7 @@ export const MobileOrderPanel: React.FC<MobileOrderPanelProps> = ({
           </div>
         </div>
 
-        {/* Baris 3: Buy & Sell Buttons */}
+        {/* Buy & Sell Buttons */}
         <button
           onClick={() => handlePlaceOrder('CALL')}
           disabled={disabled || isSubmitting || !currentPrice}
@@ -201,7 +220,6 @@ export const MobileOrderPanel: React.FC<MobileOrderPanelProps> = ({
         </button>
       </div>
 
-      {/* Warning jika tidak ada price */}
       {!currentPrice && (
         <div className="px-3 pb-3">
           <div className="bg-warning/10 border border-warning/20 rounded-lg px-3 py-2 flex items-center space-x-2">
@@ -212,4 +230,8 @@ export const MobileOrderPanel: React.FC<MobileOrderPanelProps> = ({
       )}
     </div>
   );
-};
+});
+
+MobileOrderPanel.displayName = 'MobileOrderPanel';
+
+export { MobileOrderPanel };

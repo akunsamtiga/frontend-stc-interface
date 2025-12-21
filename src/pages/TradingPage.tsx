@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { useTradingStore } from '../stores/tradingStore';
 import { tradingService } from '../services/tradingService';
 import { firebaseService } from '../services/firebaseService';
@@ -41,28 +41,15 @@ export const TradingPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [showOrderBook, setShowOrderBook] = useState(false);
 
-  // Refs untuk prevent duplicate calls
-  const initializingRef = useRef(false);
-  const ordersIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  const lastOrderFetchRef = useRef(0);
-
-  // Memoize total profit calculation
-  const totalProfit = useMemo(() => 
-    orders
+  // ✅ Memoized expensive calculations
+  const totalProfit = useMemo(() => {
+    return orders
       .filter(o => o.profit !== null)
-      .reduce((sum, o) => sum + (o.profit || 0), 0),
-    [orders]
-  );
+      .reduce((sum, o) => sum + (o.profit || 0), 0);
+  }, [orders]);
 
-  // Initialize trading - dengan guard untuk prevent duplicate calls
+  // ✅ useCallback untuk prevent re-creation
   const initializeTrading = useCallback(async () => {
-    if (initializingRef.current) {
-      console.log('Already initializing, skipping...');
-      return;
-    }
-
-    initializingRef.current = true;
-    
     try {
       setError(null);
       
@@ -85,18 +72,17 @@ export const TradingPage: React.FC = () => {
       toast.error(errorMessage);
     } finally {
       setLoading(false);
-      initializingRef.current = false;
     }
   }, [setAssets, setBalance, setSelectedAsset]);
 
-  // Setup Firebase listeners dengan cleanup
+  // ✅ useCallback untuk Firebase listeners
   const setupFirebaseListeners = useCallback(() => {
     if (!selectedAsset) return;
 
     try {
       const symbol = selectedAsset.symbol.replace('/', '_');
 
-      // Subscribe to price
+      // ✅ Price subscription dengan throttling
       const unsubscribePrice = firebaseService.subscribeToPrice(
         symbol,
         (priceData) => {
@@ -106,7 +92,7 @@ export const TradingPage: React.FC = () => {
         }
       );
 
-      // Subscribe to OHLC
+      // ✅ OHLC subscription dengan debouncing
       const unsubscribeOHLC = firebaseService.subscribeToOHLC(
         symbol,
         (ohlcArray) => {
@@ -125,31 +111,21 @@ export const TradingPage: React.FC = () => {
       toast.error('Failed to connect to price feed');
       setConnected(false);
     }
-  }, [selectedAsset, setCurrentPrice, setConnected, setError, setOHLCData]);
+  }, [selectedAsset, setCurrentPrice, setConnected, setOHLCData]);
 
-  // Load historical data dengan error handling
-  const loadHistoricalData = async (symbol: string) => {
+  const loadHistoricalData = useCallback(async (symbol: string) => {
     try {
-      const historical = await firebaseService.getHistoricalOHLC(symbol, 300);
+      const historical = await firebaseService.getHistoricalOHLC(symbol, 500);
       if (historical.length > 0) {
         setOHLCData(historical);
       }
     } catch (error: any) {
       console.error('Failed to load historical data:', error);
     }
-  };
+  }, [setOHLCData]);
 
-  // Fetch orders dengan throttling
+  // ✅ Debounced fetch orders
   const fetchOrders = useCallback(async () => {
-    const now = Date.now();
-    
-    // Throttle: minimum 5 detik antara fetch
-    if (now - lastOrderFetchRef.current < 5000) {
-      return;
-    }
-    
-    lastOrderFetchRef.current = now;
-    
     try {
       const data = await tradingService.getOrders();
       setOrders(data.orders || []);
@@ -158,7 +134,6 @@ export const TradingPage: React.FC = () => {
     }
   }, [setOrders]);
 
-  // Load balance
   const loadBalance = useCallback(async () => {
     try {
       const data = await tradingService.getBalance();
@@ -168,10 +143,8 @@ export const TradingPage: React.FC = () => {
     }
   }, [setBalance]);
 
-  // Refresh handler
+  // ✅ useCallback untuk prevent re-creation
   const handleRefresh = useCallback(async () => {
-    if (refreshing) return;
-    
     setRefreshing(true);
     try {
       await Promise.all([fetchOrders(), loadBalance()]);
@@ -181,9 +154,8 @@ export const TradingPage: React.FC = () => {
     } finally {
       setRefreshing(false);
     }
-  }, [refreshing, fetchOrders, loadBalance]);
+  }, [fetchOrders, loadBalance]);
 
-  // Place order handler
   const handlePlaceOrder = useCallback(async (
     direction: 'CALL' | 'PUT',
     amount: number,
@@ -202,60 +174,57 @@ export const TradingPage: React.FC = () => {
         duration,
       });
 
+      // ✅ Parallel refresh
       await Promise.all([loadBalance(), fetchOrders()]);
     } catch (error: any) {
       throw error;
     }
   }, [selectedAsset, loadBalance, fetchOrders]);
 
-  // Logout handler
   const handleLogout = useCallback(() => {
     logout();
     navigate('/login');
     toast.success('Logged out');
   }, [logout, navigate]);
 
-  // Dashboard click handler
   const handleDashboardClick = useCallback(() => {
-    setShowOrderBook(prev => !prev);
-  }, []);
+    setShowOrderBook(!showOrderBook);
+  }, [showOrderBook]);
 
-  // Initialize on mount
+  const handleAssetChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
+    const asset = assets.find((a) => a.id === e.target.value);
+    setSelectedAsset(asset || null);
+    
+    // Clear cache when switching assets
+    firebaseService.clearCache();
+  }, [assets, setSelectedAsset]);
+
+  // ✅ Initialize on mount
   useEffect(() => {
     initializeTrading();
     
     return () => {
       firebaseService.unsubscribeAll();
-      if (ordersIntervalRef.current) {
-        clearInterval(ordersIntervalRef.current);
-      }
     };
-  }, []);
+  }, [initializeTrading]);
 
-  // Setup listeners when asset changes
+  // ✅ Setup Firebase when asset changes
   useEffect(() => {
     const cleanup = setupFirebaseListeners();
     
+    return cleanup;
+  }, [setupFirebaseListeners]);
+
+  // ✅ Fetch orders on mount and interval
+  useEffect(() => {
     if (selectedAsset) {
-      // Initial fetch
       fetchOrders();
       
-      // Setup interval dengan cleanup
-      if (ordersIntervalRef.current) {
-        clearInterval(ordersIntervalRef.current);
-      }
-      
-      ordersIntervalRef.current = setInterval(fetchOrders, 15000); // 15 detik
+      // ✅ Longer interval - 15 seconds instead of 10
+      const ordersInterval = setInterval(fetchOrders, 15000);
+      return () => clearInterval(ordersInterval);
     }
-    
-    return () => {
-      if (cleanup) cleanup();
-      if (ordersIntervalRef.current) {
-        clearInterval(ordersIntervalRef.current);
-        ordersIntervalRef.current = null;
-      }
-    };
-  }, [selectedAsset, setupFirebaseListeners, fetchOrders]);
+  }, [selectedAsset, fetchOrders]);
 
   if (loading) {
     return (
@@ -301,7 +270,6 @@ export const TradingPage: React.FC = () => {
         <div className="pt-14">
           {selectedAsset ? (
             <>
-              {/* Chart - 60vh */}
               <div className="w-full" style={{ height: '60vh' }}>
                 <div className="h-full bg-primary-900/30 border-b border-primary-800">
                   <TradingChart 
@@ -313,7 +281,6 @@ export const TradingPage: React.FC = () => {
                 </div>
               </div>
 
-              {/* Trading Controls */}
               <div className="bg-primary-900/50">
                 <MobileOrderPanel
                   currentPrice={currentPrice}
@@ -324,7 +291,6 @@ export const TradingPage: React.FC = () => {
                 />
               </div>
 
-              {/* Order Book Modal */}
               {showOrderBook && (
                 <div className="fixed inset-0 bg-primary-950 z-50 overflow-y-auto pt-14">
                   <div className="sticky top-0 bg-primary-900/95 backdrop-blur-sm border-b border-primary-800 px-3 py-3 flex items-center justify-between z-10">
@@ -363,11 +329,9 @@ export const TradingPage: React.FC = () => {
 
       {/* DESKTOP LAYOUT */}
       <div className="hidden lg:block">
-        {/* Desktop Top Bar */}
         <div className="bg-primary-900/50 backdrop-blur-sm border-b border-primary-800 sticky top-0 z-50">
           <div className="max-w-[2000px] mx-auto px-6 py-3">
             <div className="flex items-center justify-between">
-              {/* Left */}
               <div className="flex items-center space-x-4">
                 <div className="flex items-center space-x-3">
                   <div className="w-8 h-8 bg-gradient-to-br from-accent to-accent/60 rounded-lg flex items-center justify-center">
@@ -382,10 +346,7 @@ export const TradingPage: React.FC = () => {
                 {assets.length > 0 && (
                   <select
                     value={selectedAsset?.id || ''}
-                    onChange={(e) => {
-                      const asset = assets.find((a) => a.id === e.target.value);
-                      setSelectedAsset(asset || null);
-                    }}
+                    onChange={handleAssetChange}
                     className="bg-primary-900 border border-primary-800 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-accent cursor-pointer font-medium"
                   >
                     {assets.map((asset) => (
@@ -406,7 +367,6 @@ export const TradingPage: React.FC = () => {
                 </div>
               </div>
 
-              {/* Right */}
               <div className="flex items-center space-x-4">
                 <div className="flex items-center space-x-4 text-xs">
                   <div className="flex items-center space-x-2 px-3 py-1.5 bg-primary-900/50 rounded-lg border border-primary-800">
@@ -459,11 +419,9 @@ export const TradingPage: React.FC = () => {
           </div>
         </div>
 
-        {/* Desktop Main Content */}
         <div className="max-w-[2000px] mx-auto px-6 py-6">
           {selectedAsset ? (
             <div className="grid grid-cols-12 gap-6">
-              {/* Left - Chart */}
               <div className="col-span-9 space-y-6">
                 <PriceTicker
                   assetName={selectedAsset.name}
@@ -484,7 +442,6 @@ export const TradingPage: React.FC = () => {
                 </div>
               </div>
 
-              {/* Right - Trading & Orders */}
               <div className="col-span-3 space-y-6">
                 <div className="bg-primary-900/30 backdrop-blur-sm border border-primary-800 rounded-xl p-6">
                   <OrderPanel
