@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useTradingStore } from '../stores/tradingStore';
 import { tradingService } from '../services/tradingService';
 import { firebaseService } from '../services/firebaseService';
@@ -41,24 +41,25 @@ export const TradingPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [showOrderBook, setShowOrderBook] = useState(false);
 
-  // ✅ useRef untuk prevent multiple calls
-  const initRef = useRef(false);
-  const ordersIntervalRef = useRef<NodeJS.Timeout>();
-  const balanceIntervalRef = useRef<NodeJS.Timeout>();
+  useEffect(() => {
+    initializeTrading();
+    
+    return () => {
+      firebaseService.unsubscribeAll();
+    };
+  }, []);
 
-  // ✅ useMemo untuk expensive calculations
-  const totalProfit = useMemo(() => {
-    return orders
-      .filter(o => o.profit !== null)
-      .reduce((sum, o) => sum + (o.profit || 0), 0);
-  }, [orders]);
+  useEffect(() => {
+    if (selectedAsset) {
+      setupFirebaseListeners();
+      fetchOrders();
+      
+      const ordersInterval = setInterval(fetchOrders, 10000);
+      return () => clearInterval(ordersInterval);
+    }
+  }, [selectedAsset]);
 
-  // ✅ useCallback untuk prevent re-creation
-  const initializeTrading = useCallback(async () => {
-    // Prevent double initialization
-    if (initRef.current) return;
-    initRef.current = true;
-
+  const initializeTrading = async () => {
     try {
       setError(null);
       
@@ -82,16 +83,14 @@ export const TradingPage: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [setAssets, setBalance, setSelectedAsset]);
+  };
 
-  // ✅ useCallback untuk Firebase listeners
-  const setupFirebaseListeners = useCallback(() => {
+  const setupFirebaseListeners = () => {
     if (!selectedAsset) return;
 
     try {
       const symbol = selectedAsset.symbol.replace('/', '_');
 
-      // ✅ Price subscription (sudah di-throttle di firebaseService)
       const unsubscribePrice = firebaseService.subscribeToPrice(
         symbol,
         (priceData) => {
@@ -101,7 +100,6 @@ export const TradingPage: React.FC = () => {
         }
       );
 
-      // ✅ OHLC subscription (sudah di-debounce di firebaseService)
       const unsubscribeOHLC = firebaseService.subscribeToOHLC(
         symbol,
         (ohlcArray) => {
@@ -109,51 +107,43 @@ export const TradingPage: React.FC = () => {
         }
       );
 
-      // Load historical data (one-time)
       loadHistoricalData(symbol);
-
-      return () => {
-        unsubscribePrice();
-        unsubscribeOHLC();
-      };
     } catch (error: any) {
       toast.error('Failed to connect to price feed');
       setConnected(false);
     }
-  }, [selectedAsset, setCurrentPrice, setConnected, setOHLCData]);
+  };
 
-  const loadHistoricalData = useCallback(async (symbol: string) => {
+  const loadHistoricalData = async (symbol: string) => {
     try {
-      const historical = await firebaseService.getHistoricalOHLC(symbol, 300);
+      const historical = await firebaseService.getHistoricalOHLC(symbol, 500);
       if (historical.length > 0) {
         setOHLCData(historical);
       }
     } catch (error: any) {
       console.error('Failed to load historical data:', error);
     }
-  }, [setOHLCData]);
+  };
 
-  // ✅ Fetch orders with longer interval
-  const fetchOrders = useCallback(async () => {
+  const fetchOrders = async () => {
     try {
       const data = await tradingService.getOrders();
       setOrders(data.orders || []);
     } catch (error: any) {
       console.error('Failed to fetch orders:', error);
     }
-  }, [setOrders]);
+  };
 
-  const loadBalance = useCallback(async () => {
+  const loadBalance = async () => {
     try {
       const data = await tradingService.getBalance();
       setBalance(data.balance);
     } catch (error: any) {
-      console.error('Failed to load balance:', error);
+      toast.error('Failed to update balance');
     }
-  }, [setBalance]);
+  };
 
-  // ✅ useCallback untuk prevent re-creation
-  const handleRefresh = useCallback(async () => {
+  const handleRefresh = async () => {
     setRefreshing(true);
     try {
       await Promise.all([fetchOrders(), loadBalance()]);
@@ -163,9 +153,9 @@ export const TradingPage: React.FC = () => {
     } finally {
       setRefreshing(false);
     }
-  }, [fetchOrders, loadBalance]);
+  };
 
-  const handlePlaceOrder = useCallback(async (
+  const handlePlaceOrder = async (
     direction: 'CALL' | 'PUT',
     amount: number,
     duration: number
@@ -183,70 +173,21 @@ export const TradingPage: React.FC = () => {
         duration,
       });
 
-      // ✅ Parallel refresh
       await Promise.all([loadBalance(), fetchOrders()]);
     } catch (error: any) {
       throw error;
     }
-  }, [selectedAsset, loadBalance, fetchOrders]);
+  };
 
-  const handleLogout = useCallback(() => {
+  const handleLogout = () => {
     logout();
     navigate('/login');
     toast.success('Logged out');
-  }, [logout, navigate]);
+  };
 
-  const handleDashboardClick = useCallback(() => {
+  const handleDashboardClick = () => {
     setShowOrderBook(!showOrderBook);
-  }, [showOrderBook]);
-
-  const handleAssetChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
-    const asset = assets.find((a) => a.id === e.target.value);
-    setSelectedAsset(asset || null);
-    
-    // Clear cache when switching assets
-    firebaseService.clearCache();
-  }, [assets, setSelectedAsset]);
-
-  // ✅ Initialize on mount
-  useEffect(() => {
-    initializeTrading();
-    
-    return () => {
-      firebaseService.unsubscribeAll();
-      if (ordersIntervalRef.current) clearInterval(ordersIntervalRef.current);
-      if (balanceIntervalRef.current) clearInterval(balanceIntervalRef.current);
-    };
-  }, [initializeTrading]);
-
-  // ✅ Setup Firebase when asset changes
-  useEffect(() => {
-    const cleanup = setupFirebaseListeners();
-    
-    return cleanup;
-  }, [setupFirebaseListeners]);
-
-  // ✅ Fetch orders with LONGER interval - 30 seconds (naik dari 15)
-  useEffect(() => {
-    if (selectedAsset) {
-      fetchOrders();
-      
-      ordersIntervalRef.current = setInterval(fetchOrders, 30000); // 30 detik
-      return () => {
-        if (ordersIntervalRef.current) clearInterval(ordersIntervalRef.current);
-      };
-    }
-  }, [selectedAsset, fetchOrders]);
-
-  // ✅ Balance refresh dengan interval LEBIH LAMA - 60 seconds
-  useEffect(() => {
-    if (selectedAsset) {
-      balanceIntervalRef.current = setInterval(loadBalance, 60000); // 60 detik
-      return () => {
-        if (balanceIntervalRef.current) clearInterval(balanceIntervalRef.current);
-      };
-    }
-  }, [selectedAsset, loadBalance]);
+  };
 
   if (loading) {
     return (
@@ -267,10 +208,7 @@ export const TradingPage: React.FC = () => {
           <h2 className="text-xl font-bold mb-2 text-white">Initialization Failed</h2>
           <p className="text-sm text-primary-400 mb-6">{error}</p>
           <button
-            onClick={() => {
-              initRef.current = false;
-              initializeTrading();
-            }}
+            onClick={initializeTrading}
             className="px-6 py-2.5 bg-accent text-primary-950 rounded-lg hover:bg-accent/90 transition-colors font-medium"
           >
             Retry Connection
@@ -280,10 +218,15 @@ export const TradingPage: React.FC = () => {
     );
   }
 
+  const totalProfit = orders
+    .filter(o => o.profit !== null)
+    .reduce((sum, o) => sum + (o.profit || 0), 0);
+
   return (
     <div className="min-h-screen bg-primary-950">
       {/* MOBILE LAYOUT */}
       <div className="lg:hidden">
+        {/* Mobile Navbar */}
         <MobileNavbar
           balance={balance}
           onRefresh={handleRefresh}
@@ -292,20 +235,23 @@ export const TradingPage: React.FC = () => {
           onProfileClick={handleLogout}
         />
 
+        {/* Main Content - dengan padding top untuk navbar */}
         <div className="pt-14">
           {selectedAsset ? (
             <>
-              <div className="w-full" style={{ height: '60vh' }}>
+              {/* Chart View - 65% dari screen height */}
+              <div className="w-full" style={{ height: '70vh' }}>
                 <div className="h-full bg-primary-900/30 border-b border-primary-800">
                   <TradingChart 
                     data={ohlcData} 
                     currentPrice={currentPrice}
                     activeOrders={activeOrders}
-                    height={window.innerHeight * 0.6}
+                    height={window.innerHeight * 0.70}
                   />
                 </div>
               </div>
 
+              {/* Trading Controls - 35% sisanya */}
               <div className="bg-primary-900/50">
                 <MobileOrderPanel
                   currentPrice={currentPrice}
@@ -316,8 +262,10 @@ export const TradingPage: React.FC = () => {
                 />
               </div>
 
+              {/* Order Book Modal - Full Screen Overlay */}
               {showOrderBook && (
                 <div className="fixed inset-0 bg-primary-950 z-50 overflow-y-auto pt-14">
+                  {/* Close Button */}
                   <div className="sticky top-0 bg-primary-900/95 backdrop-blur-sm border-b border-primary-800 px-3 py-3 flex items-center justify-between z-10">
                     <h3 className="text-base font-bold text-white">Orders</h3>
                     <button
@@ -330,6 +278,7 @@ export const TradingPage: React.FC = () => {
                     </button>
                   </div>
 
+                  {/* Order Book Content */}
                   <div className="p-3">
                     <OrderBook orders={orders} onRefresh={fetchOrders} />
                   </div>
@@ -342,10 +291,7 @@ export const TradingPage: React.FC = () => {
               <p className="text-lg text-white mb-2">No Assets Available</p>
               <p className="text-sm text-primary-500 mb-6">Contact administrator to configure trading assets</p>
               <button
-                onClick={() => {
-                  initRef.current = false;
-                  initializeTrading();
-                }}
+                onClick={initializeTrading}
                 className="px-6 py-2.5 bg-accent text-primary-950 rounded-lg hover:bg-accent/90 transition-colors font-medium"
               >
                 Retry
@@ -355,11 +301,13 @@ export const TradingPage: React.FC = () => {
         </div>
       </div>
 
-      {/* DESKTOP LAYOUT */}
+      {/* DESKTOP LAYOUT (tidak berubah) */}
       <div className="hidden lg:block">
+        {/* Desktop Top Bar */}
         <div className="bg-primary-900/50 backdrop-blur-sm border-b border-primary-800 sticky top-0 z-50">
           <div className="max-w-[2000px] mx-auto px-6 py-3">
             <div className="flex items-center justify-between">
+              {/* Left - Logo & Asset */}
               <div className="flex items-center space-x-4">
                 <div className="flex items-center space-x-3">
                   <div className="w-8 h-8 bg-gradient-to-br from-accent to-accent/60 rounded-lg flex items-center justify-center">
@@ -374,7 +322,10 @@ export const TradingPage: React.FC = () => {
                 {assets.length > 0 && (
                   <select
                     value={selectedAsset?.id || ''}
-                    onChange={handleAssetChange}
+                    onChange={(e) => {
+                      const asset = assets.find((a) => a.id === e.target.value);
+                      setSelectedAsset(asset || null);
+                    }}
                     className="bg-primary-900 border border-primary-800 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-accent cursor-pointer font-medium"
                   >
                     {assets.map((asset) => (
@@ -395,6 +346,7 @@ export const TradingPage: React.FC = () => {
                 </div>
               </div>
 
+              {/* Right - Stats & Actions */}
               <div className="flex items-center space-x-4">
                 <div className="flex items-center space-x-4 text-xs">
                   <div className="flex items-center space-x-2 px-3 py-1.5 bg-primary-900/50 rounded-lg border border-primary-800">
@@ -447,9 +399,11 @@ export const TradingPage: React.FC = () => {
           </div>
         </div>
 
+        {/* Desktop Main Content */}
         <div className="max-w-[2000px] mx-auto px-6 py-6">
           {selectedAsset ? (
             <div className="grid grid-cols-12 gap-6">
+              {/* Left Column - Chart */}
               <div className="col-span-9 space-y-6">
                 <PriceTicker
                   assetName={selectedAsset.name}
@@ -470,6 +424,7 @@ export const TradingPage: React.FC = () => {
                 </div>
               </div>
 
+              {/* Right Column - Trading & Orders */}
               <div className="col-span-3 space-y-6">
                 <div className="bg-primary-900/30 backdrop-blur-sm border border-primary-800 rounded-xl p-6">
                   <OrderPanel
@@ -493,10 +448,7 @@ export const TradingPage: React.FC = () => {
               <p className="text-lg text-white mb-2">No Assets Available</p>
               <p className="text-sm text-primary-500 mb-6">Contact administrator to configure trading assets</p>
               <button
-                onClick={() => {
-                  initRef.current = false;
-                  initializeTrading();
-                }}
+                onClick={initializeTrading}
                 className="px-6 py-2.5 bg-accent text-primary-950 rounded-lg hover:bg-accent/90 transition-colors font-medium"
               >
                 Retry
