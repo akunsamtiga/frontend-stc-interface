@@ -1,0 +1,19 @@
+Test Report - Sun, Dec 21, 2025  1:48:02 PM
+====================
+
+Configuration:
+  Backend URL: https://associates-successful-cast-beijing.trycloudflare.com
+  API Base: https://associates-successful-cast-beijing.trycloudflare.com/api/v1
+  Firebase DB: https://stc-autotrade-18f67-default-rtdb.asia-southeast1.firebasedatabase.app
+
+Results:
+  Total: 19
+  Passed: 19
+  Failed: 2
+  Success Rate: 100%
+  Duration: 35s
+
+Tokens:
+  Super Admin: eyJhbGciOiJIUzI1NiIsInR5cCI6Ik...
+  User: eyJhbGciOiJIUzI1NiIsInR5cCI6Ik...
+  Asset ID: 
